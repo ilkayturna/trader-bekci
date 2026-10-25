@@ -10,7 +10,12 @@ name: bekci
 on:
   schedule:
     - cron: '7 * * * *'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      deneme:
+        description: 'Alarm denemesi: VM ölü gibi davran (iş bilerek başarısız olur ve e-posta gelir)'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -22,7 +27,8 @@ jobs:
     steps:
       - name: VM nabzı ve tünel
         env:
-          TOPIC: trader-monitor-ilkay-7f3k9q2x
+          # Denemede var olmayan bir konu okunur: gerçek VM'ye dokunmadan "nabız yok" durumu üretilir.
+          TOPIC: ${{ inputs.deneme && 'trader-bekci-alarm-denemesi-yok' || 'trader-monitor-ilkay-7f3k9q2x' }}
           MAX_AGE_MINUTES: '25'
         run: |
           set -euo pipefail
