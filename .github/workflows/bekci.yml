@@ -1,0 +1,71 @@
+name: bekci
+# Sunucu dışı bekçi (dead-man switch) — Trader VM'si için.
+#
+# VM her 10 dakikada bir, uygulamanın da okuduğu herkese açık ntfy konusuna imzalı bir "buradayım"
+# mesajı yayınlar (tünel adresi + zaman). Bu iş akışı GitHub'ın sunucularında, saatte bir:
+#   (a) son mesaj 25 dakikadan eskiyse   -> VM ya da yayın zamanlayıcısı durmuş,
+#   (b) tünel adresi cevap vermiyorsa    -> VM'ye dışarıdan ulaşılamıyor
+# diye başarısız olur. Başarısız zamanlanmış iş, depo sahibine GitHub e-postası gönderir: alarm budur.
+# Bu depoda hiçbir sır yok; ntfy konusu tasarım gereği herkese açık (mobil uygulama onu taşır).
+on:
+  schedule:
+    - cron: '7 * * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  bekci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: VM nabzı ve tünel
+        env:
+          TOPIC: trader-monitor-ilkay-7f3k9q2x
+          MAX_AGE_MINUTES: '25'
+        run: |
+          set -euo pipefail
+          latest="$(curl -fsS --max-time 20 "https://ntfy.sh/${TOPIC}/json?poll=1&since=90m" | tail -n 1 || true)"
+          if [ -z "${latest}" ]; then
+            echo "::error::Son 90 dakikada VM'den hiç nabız gelmedi: sunucu ya da yayın zamanlayıcısı durmuş."
+            exit 1
+          fi
+          message="$(printf '%s' "${latest}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["message"])')"
+          url="$(printf '%s' "${message}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["apiBaseUrl"])')"
+          issued="$(printf '%s' "${message}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["issuedAtMs"])')"
+          now_ms=$(( $(date +%s) * 1000 ))
+          age_min=$(( (now_ms - issued) / 60000 ))
+          echo "Son imzalı nabız: ${age_min} dk önce"
+          if [ "${age_min}" -gt "${MAX_AGE_MINUTES}" ]; then
+            echo "::error::VM nabzı ${age_min} dakikadır gelmiyor (sınır ${MAX_AGE_MINUTES}): sunucu ya da yayın zamanlayıcısı durmuş."
+            exit 1
+          fi
+          # Uç nokta token ister: 401 sağlıklı bir cevaptır (vekil sunucu ayakta).
+          code="$(curl -s -o /dev/null --max-time 20 -w '%{http_code}' "${url}/monitor/health" || true)"
+          echo "Tünel -> HTTP ${code}"
+          case "${code}" in
+            200|401|403) echo "VM dışarıdan erişilebilir.";;
+            *)
+              echo "::error::Tünel ${code} döndü: VM'ye dışarıdan ulaşılamıyor."
+              exit 1
+              ;;
+          esac
+
+      # GitHub, 60 gün hiç değişmeyen herkese açık depolarda zamanlanmış işleri kapatır. Ayda bir
+      # tek satırlık bir kayıt depoyu canlı tutar.
+      - name: Depoyu canlı tut
+        if: success()
+        run: |
+          set -euo pipefail
+          git clone --depth 1 "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" repo
+          cd repo
+          last="$(git log -1 --format=%ct)"
+          if [ $(( $(date +%s) - last )) -gt $(( 30 * 86400 )) ]; then
+            date -u +%FT%TZ > canli.txt
+            git config user.name "bekci"
+            git config user.email "bekci@users.noreply.github.com"
+            git add canli.txt
+            git commit -m "bekci: depo canlı"
+            git push
+          fi
